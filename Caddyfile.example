@@ -1,0 +1,28 @@
+# ════════════════════════════════════════════════════════════════
+# sub2api-chat-extension Caddy 配置示例
+#
+# 关键点：
+#   1. 静态块必须在 reverse_proxy 之前（handle 是互斥且有顺序的）
+#   2. 静态直出 = 不经过 Go 后端 → 没有 CSP 和 X-Frame-Options: DENY
+#      → 因此可以被主站同源 iframe 嵌入
+#   3. 绝不要给 /v1/* 设 flush_interval，否则 SSE 流式会被缓冲
+# ════════════════════════════════════════════════════════════════
+
+api.yourdomain.com {
+    # ── 聊天页：Caddy 直接读磁盘，零后端介入 ──
+    handle /chat-app/* {
+        root * /var/www/sub2api-chat
+        uri strip_prefix /chat-app
+        try_files {path} /index.html
+        file_server
+    }
+
+    # ── 其余全部交给 sub2api ──
+    handle {
+        reverse_proxy localhost:8080 {
+            # 保持你原有配置不变
+            # 注意：不要加 flush_interval -1 之类，
+            # 官方 Caddyfile 本身就刻意不设，以保留 SSE 自动 flush
+        }
+    }
+}

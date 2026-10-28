@@ -1,0 +1,22 @@
+{
+  "name": "sub2api-chat-extension",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Sub2API 对话页：密钥选择 + 动态模型 + 推理/工具调用",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "crypto-js": "^4.2.0",
+    "dompurify": "^3.2.4",
+    "marked": "^15.0.6",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}
