@@ -8,7 +8,7 @@
 
       <label class="field">
         <span class="field-label">密钥</span>
-        <select v-model="selectedKeyId" :disabled="loading || !usableChannels.length" @change="onKeyChange">
+        <select v-model="selectedKeyId" :disabled="loading || sessionBusy || !usableChannels.length" @change="onKeyChange">
           <option v-if="!usableChannels.length" :value="null">—</option>
           <option v-for="c in usableChannels" :key="c.keyId" :value="c.keyId">
             {{ c.keyName }} · {{ c.groupName }} · {{ c.platformLabel }}
@@ -24,7 +24,7 @@
 
       <label class="field">
         <span class="field-label">模型</span>
-        <select v-model="selectedModel" :disabled="!chatModels.length" @change="onModelChange">
+        <select v-model="selectedModel" :disabled="loading || sessionBusy || !chatModels.length" @change="onModelChange">
           <option v-if="!chatModels.length" :value="null">{{ modelPlaceholder }}</option>
           <option v-for="m in chatModels" :key="m" :value="m">{{ m }}</option>
         </select>
@@ -43,7 +43,7 @@
       <button class="btn ghost" title="模型参数" @click="paramOpen = true">参数</button>
       <button class="btn ghost" title="设置" @click="settingsOpen = true">设置</button>
       <button class="btn ghost only-mobile" title="新建会话" @click="onRailCreate">＋</button>
-      <button class="btn ghost" :disabled="loading" @click="reload">刷新</button>
+      <button class="btn ghost" :disabled="loading || sessionBusy" @click="reload">刷新</button>
       <button class="btn ghost" :title="isDark ? '浅色' : '深色'" @click="toggleTheme">
         {{ isDark ? '☀' : '◐' }}
       </button>
@@ -163,13 +163,16 @@ import { SessionQueue } from './queue.js'
 import { listProviders } from '../engine/repository/catalog.js'
 import { groupTurns } from './timeline.js'
 
+import { loadUiState, saveSelection, saveParameterDraft, loadParameterDraft, clearParameterDrafts } from './persistence.js'
+
 // ── 基础状态 ──
 const token = ref(readToken())
 const channels = ref([])
-const selectedKeyId = ref(null)
+const savedUi = loadUiState()
+const selectedKeyId = ref(savedUi.selection?.keyId ?? null)
 const models = ref([])
 const chatModels = ref([])       // 对话模型（已排除生图模型）
-const selectedModel = ref(null)
+const selectedModel = ref(savedUi.selection?.model || null)
 const loading = ref(true)
 const modelsLoading = ref(false)
 const sessions = ref([])
@@ -338,6 +341,28 @@ function initTheme() {
   applyTheme(window.matchMedia?.('(prefers-color-scheme: dark)').matches || false)
 }
 
+/** One hydration path for refresh, session switch and model/key changes. */
+function applySnapshot(snap = {}) {
+  protocolOverride.value = ''
+  modelParams.value = JSON.parse(JSON.stringify(snap.model_params || {}))
+  executionParams.value = JSON.parse(JSON.stringify(snap.execution_params || {}))
+  runtimeParams.value = Object.fromEntries(
+    ['context_window', 'max_history_messages', 'history_token_ratio', 'modalities']
+      .filter((key) => snap[key] !== undefined && snap[key] !== null)
+      .map((key) => [key, JSON.parse(JSON.stringify(snap[key]))])
+  )
+}
+function rememberSelection() {
+  saveSelection({ keyId: selectedKeyId.value, model: selectedModel.value, sessionId: session.value?.id })
+}
+function parameterValues() {
+  return {
+    api: currentProtocol.value,
+    model_params: modelParams.value,
+    execution_params: executionParams.value,
+    ...runtimeParams.value,
+  }
+}
 // ── 加载 ──
 async function reload() {
   loading.value = true
@@ -376,8 +401,8 @@ async function reload() {
     /* 刷新时保留当前会话：优先用内存里的，其次用上次记下的。
      * 浏览器刷新后内存是空的，没有这条兜底就会停在「无会话」状态，
      * 参数面板读到空值，看起来像「参数没持久化」。 */
-    const keepSessionId = session.value?.id ?? settings.value.lastSessionId ?? null
-    const keep = usable.find((c) => c.keyId === selectedKeyId.value)
+    const keepSessionId = session.value?.id ?? loadUiState().selection?.sessionId ?? settings.value.lastSessionId ?? null
+    const keep = usable.find((c) => String(c.keyId) === String(selectedKeyId.value))
     selectedKeyId.value = (keep || usable[0]).keyId
 
     if (keepSessionId) {
@@ -411,34 +436,24 @@ async function reloadChannelKeepSession(sessionId) {
     const imgs = pickImageModels(list, c.platform)
     chatModels.value = list.filter((m) => !imgs.includes(m))
 
-    // 恢复会话
+    const savedModel = selectedModel.value
     const s = await getSession(sessionId)
-    if (s) {
-      session.value = s
-      events.value = await listEventVos(sessionId)
-      if (s.model_snapshot?.model_label) selectedModel.value = s.model_snapshot.model_label
-      else selectedModel.value = chatModels.value[0] || null
-
-      // 同步该会话保存的参数，否则面板显示的是空值
-      const snap = s.model_snapshot || {}
-      // 协议以快照为准：清掉内存里的临时覆盖，避免旧值残留
-      protocolOverride.value = ''
-      modelParams.value = snap.model_params || {}
-      executionParams.value = snap.execution_params || {}
-      runtimeParams.value = {
-        ...(snap.modalities ? { modalities: snap.modalities } : {}),
-        ...(snap.context_window ? { context_window: snap.context_window } : {}),
-        ...(snap.max_history_messages ? { max_history_messages: snap.max_history_messages } : {}),
-        ...(snap.history_token_ratio ? { history_token_ratio: snap.history_token_ratio } : {}),
+    const { providerId } = await providerIdsForChannel(c)
+    const validSession = s && Number(s.provider_id) === Number(providerId)
+    const sessionModel = s?.model_snapshot?.model_label
+    if (validSession && chatModels.value.includes(sessionModel)) {
+      await selectSession(sessionId)
+    } else {
+      session.value = null
+      events.value = []
+      queue.value = null
+      selectedModel.value = chatModels.value.includes(savedModel) ? savedModel : (chatModels.value[0] || null)
+      applySnapshot({})
+      if (validSession && selectedModel.value) {
+        await switchSessionModel(c, sessionId, selectedModel.value)
+        await selectSession(sessionId)
       }
-
-      queue.value = new SessionQueue({
-        sessionId,
-        runner: executeTask,
-        onChange: () => refreshQueueView(),
-        onIdle: () => { sessionBusy.value = false },
-      })
-      await refreshQueueView()
+      rememberSelection()
     }
     statusText.value = '已刷新'
   } catch (e) {
@@ -474,7 +489,8 @@ async function loadAllKeyModels(list) {
   imageModelsByKey.value = map
 }
 
-async function onKeyChange() {
+async function onKeyChange(event) {
+  const preferredModel = event ? null : selectedModel.value
   const c = currentChannel.value
   if (!c) return
   models.value = []
@@ -483,7 +499,8 @@ async function onKeyChange() {
   session.value = null
   events.value = []
   queue.value = null
-  protocolOverride.value = ''
+  applySnapshot({})
+  settings.value = saveSettings({ lastSessionId: null })
 
   notice.value = c.claudeCodeOnly
     ? { kind: 'warn', text: `分组「${c.groupName}」限制为 Claude Code 客户端，本页请求可能被拒绝。` }
@@ -523,7 +540,10 @@ async function onKeyChange() {
       return
     }
 
-    selectedModel.value = chatModels.value[0]
+    selectedModel.value = chatModels.value.includes(preferredModel) ? preferredModel : chatModels.value[0]
+    if (!event) applySnapshot(loadParameterDraft(c.keyId, selectedModel.value, null) || {})
+    else saveParameterDraft(c.keyId, selectedModel.value, null, parameterValues())
+    rememberSelection()
     await refreshSessions()
     statusText.value = '就绪'
   } catch (e) {
@@ -538,16 +558,21 @@ async function onModelChange() {
   const c = currentChannel.value
   const m = selectedModel.value
   if (!c || !m) return
+  applySnapshot({})
+  if (session.value) clearParameterDrafts(session.value.id)
   // 会话已存在时，把新模型写回会话，否则请求仍会用旧模型
   if (session.value) {
     try {
       await switchSessionModel(c, session.value.id, m)
       session.value = await getSession(session.value.id)
+      applySnapshot(session.value.model_snapshot)
       statusText.value = `已切换到 ${m}`
     } catch (e) {
       notice.value = { kind: 'err', text: `切换模型失败：${e.message || e}` }
     }
   }
+  if (!session.value) saveParameterDraft(c.keyId, m, null, parameterValues())
+  rememberSelection()
   await refreshSessions()
 }
 
@@ -595,7 +620,11 @@ async function newSession() {
     return
   }
   try {
+    const draft = session.value ? null : loadParameterDraft(c.keyId, m, null)
     const s = await createChatSession(c, m)
+    if (draft) {
+      await updateSession(s.id, { model_snapshot: { ...s.model_snapshot, ...draft } })
+    }
     await refreshSessions()
     await selectSession(s.id)
     composerRef.value?.focus()
@@ -645,17 +674,10 @@ async function selectSession(id) {
   if (!s) return
   session.value = s
   events.value = await listEventVos(id)
-  // 同步下拉框到该会话的模型
   const snap = s.model_snapshot || {}
   if (snap.model_label) selectedModel.value = snap.model_label
-  // 恢复该会话保存的运行参数（含模态、上下文窗口）
-  runtimeParams.value = {
-    ...(snap.modalities ? { modalities: snap.modalities } : {}),
-    ...(snap.context_window ? { context_window: snap.context_window } : {}),
-    ...(snap.max_history_messages ? { max_history_messages: snap.max_history_messages } : {}),
-    ...(snap.history_token_ratio ? { history_token_ratio: snap.history_token_ratio } : {}),
-  }
-  if (snap.model_params) modelParams.value = snap.model_params
+  applySnapshot(snap)
+  rememberSelection()
 
   // 重建队列
   queue.value = new SessionQueue({
@@ -690,13 +712,17 @@ async function refreshQueueView() {
 }
 
 async function removeSession(s) {
+  if (guardBusy('删除会话')) return
   if (!confirm(`删除会话「${s.title}」及其全部消息？`)) return
   await deleteSession(s.id)
+  clearParameterDrafts(s.id)
   if (session.value?.id === s.id) {
     session.value = null
     events.value = []
     queue.value = null
     sessionBusy.value = false
+    settings.value = saveSettings({ lastSessionId: null })
+    rememberSelection()
     if (preview.value) preview.value = null
   }
   await refreshSessions()
@@ -708,6 +734,7 @@ async function removeSession(s) {
  * 同时清空该会话的图片缓存——消息没了，图也没人引用了。
  */
 async function clearSession(s) {
+  if (guardBusy('清空会话')) return
   const title = s.title || '该会话'
   if (!confirm(`清空「${title}」的全部消息与图片缓存？会话本身与模型设置会保留。`)) return
   try {
@@ -732,52 +759,33 @@ async function renameSession({ session: s, title }) {
 
 // ── 模型参数 ──
 async function onSaveParams({ modelParams: mp, runtime, execution }) {
-  modelParams.value = mp || {}
-  runtimeParams.value = runtime || {}
-  executionParams.value = execution || {}
-
   const c = currentChannel.value
   const m = selectedModel.value
   if (!c || !m) return
-
-  // 写回会话快照，后续轮次生效
-  if (session.value) {
-    try {
+  modelParams.value = mp || {}
+  runtimeParams.value = runtime || {}
+  executionParams.value = execution || {}
+  // Capture identity + values before any await; never save into another session after switching.
+  const sid = session.value?.id ?? null
+  const values = JSON.parse(JSON.stringify(parameterValues()))
+  try {
+    saveParameterDraft(c.keyId, m, sid, values)
+    rememberSelection()
+    if (sid !== null) {
       const { providerId, modelId } = await ensureProviderModel(c, m)
-      /* 协议必须用当前生效的值（currentProtocol），不能按网关硬算。
-       * 按网关算会把用户选的 responses 覆盖回 completions，
-       * 表现为「改了协议、刷新后又变回去」。 */
-      const api = currentProtocol.value
       const snap = {
-        provider_id: providerId,
-        model_id: modelId,
+        ...(session.value?.id === sid ? session.value.model_snapshot : {}),
+        provider_id: providerId, model_id: modelId,
         provider_kind: currentProviderKind.value,
-        provider_label: `${c.keyName} · ${c.groupName}`,
-        model_label: m,
-        api,
-        model_params: modelParams.value,
-        execution_params: executionParams.value,
+        provider_label: `${c.keyName} · ${c.groupName}`, model_label: m,
+        ...values,
       }
-      /* runtime 是面板 emit 出来的**普通对象**，不是 ref。
-       * 早先误写成 runtime.value?.xxx，恒为 undefined，
-       * 导致上下文窗口、模态这些运行参数从没被真正写进快照——
-       * 表现就是「保存了、切会话或刷新后又变回默认值」。 */
-      if (runtime?.context_window) snap.context_window = runtime.context_window
-      if (runtime?.max_history_messages) snap.max_history_messages = runtime.max_history_messages
-      if (runtime?.history_token_ratio) snap.history_token_ratio = runtime.history_token_ratio
-      // 输入模态必须落盘：它决定 read_image 工具是否注册
-      if (Array.isArray(runtime?.modalities) && runtime.modalities.length) {
-        snap.modalities = runtime.modalities
-      }
-
-      await updateSession(session.value.id, { model_snapshot: snap })
-      // 必须重新读取：工具注册读的是 session.model_snapshot.modalities，
-      // 不刷新会导致「界面显示已勾选、但工具没注册」。
-      session.value = await getSession(session.value.id)
-      statusText.value = '参数已保存'
-    } catch (e) {
-      notice.value = { kind: 'err', text: `保存参数失败：${e.message || e}` }
+      const saved = await updateSession(sid, { provider_id: providerId, model_id: modelId, model_snapshot: snap })
+      if (session.value?.id === sid) { session.value = saved; applySnapshot(saved.model_snapshot) }
     }
+    statusText.value = '参数已保存'
+  } catch (e) {
+    notice.value = { kind: 'err', text: `保存参数失败：${e.message || e}` }
   }
 }
 

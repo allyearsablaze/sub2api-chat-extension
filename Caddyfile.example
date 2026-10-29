@@ -14,6 +14,8 @@ api.yourdomain.com {
         root * /var/www/sub2api-chat
         uri strip_prefix /chat-app
         try_files {path} /index.html
+        # 入口始终重新校验，避免新版本上线后继续运行旧 JS
+        header Cache-Control "no-cache"
         file_server
     }
 

@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:persistence": "npm run build && node tests/persistence.cjs"
   },
   "dependencies": {
     "crypto-js": "^4.2.0",
@@ -17,6 +18,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
+    "playwright": "^1.64.1",
     "vite": "^6.0.7"
   }
 }

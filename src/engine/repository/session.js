@@ -1,3 +1,4 @@
+import { cacheSession, removeCachedSession, withCachedSnapshot } from './session_cache.js'
 import { db } from './db.js'
 import { ensure } from '../common/errors.js'
 import { nowIso } from '../common/time.js'
@@ -105,7 +106,7 @@ export function normalizeSession(input = {}) {
  * 所以这里实时统计一次；会话数量通常不多（几十条），开销可接受。
  */
 export async function listSessions() {
-  const rows = await db.all('sessions')
+  const rows = (await db.all('sessions')).map(withCachedSnapshot)
   const counts = new Map()
   try {
     const events = await db.all('message_events')
@@ -121,14 +122,18 @@ export async function listSessions() {
     /* 统计失败不影响列表 */
   }
   return rows
-    .map((s) => ({ ...s, message_count: counts.get(Number(s.id)) || 0 }))
+    .map((s) => {
+      const row = { ...s, message_count: counts.get(Number(s.id)) || 0 }
+      cacheSession(row)
+      return row
+    })
     .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
 }
 
 export async function getSession(sessionId) {
   const id = toNumberOrNull(sessionId)
   if (id === null) return null
-  return (await db.get('sessions', id)) || null
+  return withCachedSnapshot((await db.get('sessions', id)) || null)
 }
 
 export async function requireSession(sessionId) {
@@ -141,7 +146,9 @@ export async function createSession(input = {}) {
   const record = normalizeSession(input)
   const created = { ...record }
   delete created.id
-  return db.add('sessions', created)
+  const id = await db.add('sessions', created)
+  cacheSession({ ...created, id })
+  return id
 }
 
 export async function updateSession(sessionId, patch = {}) {
@@ -152,6 +159,7 @@ export async function updateSession(sessionId, patch = {}) {
     updated_at: nowIso()
   }
   await db.put('sessions', next)
+  cacheSession(next)
   return next
 }
 
@@ -188,6 +196,7 @@ export async function updateSessionSnapshot(sessionId, payload = {}) {
     updated_at: nowIso()
   }
   await db.put('sessions', next)
+  cacheSession(next)
   return next
 }
 
@@ -215,6 +224,7 @@ export async function deleteSession(sessionId) {
    * 会话都删了却还在占空间。 */
   await deleteImagesBySession(session.id).catch(() => {})
   await db.remove('sessions', session.id)
+  removeCachedSession(session.id)
   return true
 }
 
