@@ -12,6 +12,7 @@
  */
 import { db } from './db.js'
 import { nowIso } from '../common/time.js'
+import { normalizeImageDataUrl } from '../common/image.js'
 
 const STORE = 'image_cache'
 
@@ -58,7 +59,9 @@ export async function cacheImage(input = {}) {
 export async function getImage(id) {
   const key = String(id || '').trim()
   if (!key) return null
-  return db.get(STORE, key)
+  const row = await db.get(STORE, key)
+  if (!row?.data_url?.startsWith('data:')) return row
+  return { ...row, ...normalizeImageDataUrl(row.data_url) }
 }
 
 /** 批量取（用于列表展示） */

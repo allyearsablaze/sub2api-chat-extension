@@ -137,9 +137,7 @@
     />
 
     <!-- 图片预览 -->
-    <div v-if="preview" class="lightbox" @click="preview = null">
-      <img :src="preview" alt="预览" />
-    </div>
+    <ImagePreview v-if="preview" :src="preview" @close="preview = null" />
   </div>
 </template>
 
@@ -150,6 +148,7 @@ import SessionRail from './components/SessionRail.vue'
 import Composer from './components/Composer.vue'
 import ParamDialog from './components/ParamDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import ImagePreview from './components/ImagePreview.vue'
 import { loadSettings, saveSettings, clearSettings } from './settings.js'
 import { loadChannels, fetchModels, readToken } from './sub2api.js'
 import {
@@ -1102,12 +1101,7 @@ html[data-theme='dark'] .notice.err { background: #2a0e0e; color: #f87171; borde
 .empty h2 { font-size: 16px; color: var(--text); margin: 0 0 7px; font-weight: 600; }
 .empty p { margin: 0; font-size: 13px; max-width: 420px; line-height: 1.7; }
 
-.lightbox {
-  position: fixed; inset: 0; z-index: 99;
-  background: rgba(0,0,0,.88);
-  display: grid; place-items: center; padding: 24px; cursor: zoom-out;
-}
-.lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+
 
 /* 宽屏隐藏仅移动端元素 */
 .only-mobile { display: none; }

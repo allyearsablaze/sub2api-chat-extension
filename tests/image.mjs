@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { chromium } from 'playwright'
@@ -38,10 +39,13 @@ for (const unsupported of [
   { platform: 'gemini', model: 'gemini-2.5-flash-image' },
 ]) assert.throws(() => buildImageOptions({ output_format: 'svg' }, unsupported), { code: 'IMAGE_INVALID_OPTIONS' })
 assert.deepEqual(buildImageOptions({}, { platform: 'openai', model: 'gpt-image-1' }), {})
-assert.equal(parseImageResults({ data: [{ b64_json: 'AA==' }] })[0].mime, 'image/png')
-assert.equal(parseImageResults({ output_format: 'webp', data: [{ b64_json: 'AA==', output_format: 'jpeg' }] }, 'gif')[0].mime, 'image/jpeg')
-assert.equal(parseImageResults({ data: [{ url: 'data:image/svg+xml;base64,AA==' }] })[0].mime, 'image/svg+xml')
-assert.equal(parseImageResults({ data: [{ url: 'https://example.test/image' }] }, 'gif')[0].mime, 'image/gif')
+const pngBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64')
+assert.equal(parseImageResults({ data: [{ b64_json: pngBytes.toString('base64') }] })[0].mime, 'image/png')
+assert.equal(parseImageResults({ output_format: 'svg', data: [{ b64_json: pngBytes.toString('base64') }] }, 'svg')[0].mime, 'image/png')
+assert.match(parseImageResults({ output_format: 'svg', data: [{ b64_json: pngBytes.toString('base64') }] }, 'svg')[0].format_warning, /实际返回 PNG/)
+assert.equal(parseImageResults({ data: [{ url: `data:image/svg+xml;base64,${pngBytes.toString('base64')}` }] })[0].mime, 'image/png')
+assert.throws(() => parseImageResults({ data: [{ b64_json: Buffer.from('not an image').toString('base64') }] }), /图片内容/)
+assert.equal(parseImageResults({ data: [{ b64_json: Buffer.from('<svg/>').toString('base64') }] })[0].mime, 'image/svg+xml')
 assert.equal(imageExtension('image/svg+xml'), 'svg')
 assert.equal(imageExtension('image/gif'), 'gif')
 console.log('PASS model recognition, parameter validation, MIME precedence and legacy PNG')
@@ -62,10 +66,12 @@ const fixture = {
     return `
       import * as imageVue from 'vue'
       import SafeImage from '/src/ui/components/SafeImage.vue'
+      import ImagePreview from '/src/ui/components/ImagePreview.vue'
+      import '/src/ui/styles.css'
       import * as imageTools from '/src/engine/runtime/tools/image.js'
       import * as editTools from '/src/engine/runtime/tools/image_edit.js'
       import * as imageCache from '/src/engine/repository/image_cache.js'
-      Object.assign(window, { imageVue, SafeImage, imageTools, editTools, imageCache })
+      Object.assign(window, { imageVue, SafeImage, ImagePreview, imageTools, editTools, imageCache })
     `
   },
 }
@@ -104,6 +110,11 @@ try {
     } catch (error) {
       console.error(await page.locator('#image-test').innerHTML())
       throw error
+    }
+    if (process.env.IMAGE_SCREENSHOT_DIR) {
+      const { mkdir } = await import('node:fs/promises')
+      await mkdir(process.env.IMAGE_SCREENSHOT_DIR, { recursive: true })
+      await page.locator('#image-test').screenshot({ path: `${process.env.IMAGE_SCREENSHOT_DIR}/image-card-${format}.png` })
     }
     await page.locator('#image-test img').click()
     assert.equal(await page.evaluate(() => window.previewSource), row.data_url)
@@ -166,6 +177,61 @@ try {
     await page.evaluate(() => import('/image-fixture.js'))
     console.log(`PASS ${format}: generation, edit multipart, IndexedDB reload, preview and byte-exact download`)
   }
+  const reproduction = process.env.IMAGE_REPRO_FILE ? await readFile(process.env.IMAGE_REPRO_FILE) : pngBytes
+  for (const operation of ['generate', 'edit']) {
+    response = { output_format: 'svg', data: [{ b64_json: reproduction.toString('base64') }] }
+    const generated = await run(operation, { prompt: 'SVG', output_format: 'svg', image: png })
+    assert.equal(generated.row.mime, 'image/png')
+    assert.match(generated.result.warnings[0], /实际返回 PNG/)
+    await verifyCard(generated.row, reproduction, 'png')
+  }
+  const legacy = await page.evaluate(async data => {
+    const { db } = await import('/src/engine/repository/db.js')
+    const row = { id: 'img_legacy', data_url: `data:image/svg+xml;base64,${data}`, mime: 'image/svg+xml' }
+    await db.put('image_cache', row)
+    return window.imageCache.getImage(row.id)
+  }, reproduction.toString('base64'))
+  assert.equal(legacy.mime, 'image/png')
+  await verifyCard(legacy, reproduction, 'png')
+  console.log('PASS mislabeled PNG: generation/edit warnings, original bytes and legacy cache preview/download')
+
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport)
+    const mountPreview = () => page.evaluate(src => {
+      window.previewApp?.unmount()
+      const mount = document.querySelector('#preview-test') || document.body.appendChild(Object.assign(document.createElement('div'), { id: 'preview-test' }))
+      const { createApp, h, ref } = window.imageVue
+      window.previewApp = createApp({ setup() {
+        const open = ref(true)
+        return () => open.value ? h(window.ImagePreview, { src, onClose: () => { open.value = false } }) : null
+      } })
+      window.previewApp.mount(mount)
+    }, legacy.data_url)
+    await mountPreview()
+    await page.waitForFunction(() => document.querySelector('.image-stage img')?.naturalWidth > 0)
+    const image = await page.locator('.image-stage img').boundingBox()
+    assert.ok(image.width <= Math.min(900, viewport.width - 24))
+    assert.ok(image.height <= viewport.height * .7 + 1)
+    if (process.env.IMAGE_SCREENSHOT_DIR) {
+      await page.screenshot({ path: `${process.env.IMAGE_SCREENSHOT_DIR}/preview-${viewport.width}.png` })
+    }
+    await page.keyboard.press('Escape')
+    await page.getByRole('dialog').waitFor({ state: 'detached' })
+    await mountPreview()
+    await page.getByRole('button', { name: '关闭预览' }).click()
+    await page.getByRole('dialog').waitFor({ state: 'detached' })
+    await mountPreview()
+    await page.locator('.image-overlay').click({ position: { x: 2, y: 2 } })
+    await page.getByRole('dialog').waitFor({ state: 'detached' })
+  }
+  console.log('PASS desktop/mobile preview bounds, Esc, close button and backdrop close')
+  await page.route('**/upstream-image', route => route.fulfill({ contentType: 'image/svg+xml', body: reproduction }))
+  response = { data: [{ url: `${origin}/upstream-image` }] }
+  const remoteImage = await run('generate', { prompt: 'svg', output_format: 'svg' })
+  assert.equal(remoteImage.row.mime, 'image/png')
+  assert.match(remoteImage.result.warnings[0], /实际返回 PNG/)
+  await verifyCard(remoteImage.row, reproduction, 'png')
+  console.log('PASS remote image actual-byte validation')
   response = { data: [{ url: `data:image/gif;base64,${gif.toString('base64')}` }] }
   assert.equal((await run('generate', { prompt: 'gif', output_format: 'gif' })).row.mime, 'image/gif')
   console.log('PASS data URL response MIME')
