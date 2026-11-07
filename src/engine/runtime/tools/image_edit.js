@@ -12,7 +12,7 @@
 import { toolRegistry, jsonSchema, schemaTypes as t } from './registry.js'
 import { AppError } from '../../common/errors.js'
 import { getImage, cacheImage } from '../../repository/image_cache.js'
-import { imageExtension, parseImageResults } from '../../common/image.js'
+import { imageExtension, resolveImageResults } from '../../common/image.js'
 import { buildImageOptions, imageOptionProperties } from './image_options.js'
 import {
   platformSupportsImage, GEMINI_IMAGE_PLATFORMS
@@ -139,7 +139,7 @@ export async function runImageEdit(args, ctx = {}) {
   const json = await resp.json()
   if (json.error) throw new AppError(json.error.message || '图片编辑失败', 'IMAGE_UPSTREAM_ERROR')
 
-  const images = parseImageResults(json, options.output_format)
+  const images = await resolveImageResults(json, options.output_format, ctx.signal)
   if (!images.length) throw new AppError('上游未返回编辑结果', 'IMAGE_EMPTY_RESULT')
 
   /* 与 generate_image 一致：写缓存并只返回短 ID。
@@ -171,6 +171,7 @@ export async function runImageEdit(args, ctx = {}) {
     platform,
     source_id: source.record?.id || null,
     images: cached.length ? cached : images,
+    warnings: images.map((image) => image.format_warning).filter(Boolean),
     elapsed_ms: Date.now() - started,
   }
 }

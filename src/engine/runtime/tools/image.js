@@ -10,7 +10,7 @@
 import { toolRegistry, jsonSchema, schemaTypes as t } from './registry.js'
 import { AppError } from '../../common/errors.js'
 import { cacheImage } from '../../repository/image_cache.js'
-import { parseImageResults } from '../../common/image.js'
+import { resolveImageResults } from '../../common/image.js'
 import { buildImageOptions, imageOptionProperties } from './image_options.js'
 
 export const IMAGE_PLATFORMS = new Set(['openai', 'grok'])
@@ -146,10 +146,10 @@ export async function runImageGeneration(args, ctx = {}) {
   const json = await resp.json()
   if (json.error) throw new AppError(json.error.message || '生图失败', 'IMAGE_UPSTREAM_ERROR')
 
-  const images = parseImageResults(json, options.output_format)
+  const images = await resolveImageResults(json, options.output_format, ctx.signal)
   if (!images.length) throw new AppError('上游未返回图片数据', 'IMAGE_EMPTY_RESULT')
   const cached2 = await persistImages(images, { prompt, model, platform, sessionId: ctx.sessionId, turnId: ctx.turnId })
-  return { ok: true, model, platform, images: cached2, elapsed_ms: Date.now() - started }
+  return { ok: true, model, platform, images: cached2, warnings: images.map((image) => image.format_warning).filter(Boolean), elapsed_ms: Date.now() - started }
 }
 
 /**
