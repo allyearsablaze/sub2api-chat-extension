@@ -11,7 +11,7 @@ import { toolRegistry, jsonSchema, schemaTypes as t } from './registry.js'
 import { AppError } from '../../common/errors.js'
 import { cacheImage } from '../../repository/image_cache.js'
 import { resolveImageResults } from '../../common/image.js'
-import { buildImageOptions, imageOptionProperties } from './image_options.js'
+import { buildImageOptions, imageCapabilities, requireImageConfig } from './image_options.js'
 
 export const IMAGE_PLATFORMS = new Set(['openai', 'grok'])
 export const GEMINI_IMAGE_PLATFORMS = new Set(['gemini', 'antigravity'])
@@ -72,17 +72,11 @@ async function readError(resp) {
 
 /**
  * 真正执行生图。ctx 由宿主注入：
- *   { apiKey, platform, baseUrl, model }
+ *   { imageConfig: { apiKey, platform, model }, baseUrl }
  * baseUrl 为空时使用同源绝对路径（部署在同域名下时最短路径）。
  */
 export async function runImageGeneration(args, ctx = {}) {
-  /* 优先使用设置页配置的生图分组与模型（imageConfig），
-   * 这样生图与当前对话所用的密钥/模型解耦 */
-  const cfg = ctx.imageConfig && ctx.imageConfig.apiKey ? ctx.imageConfig : null
-  const apiKey = cfg ? cfg.apiKey : ctx.apiKey
-  const platform = cfg ? cfg.platform : (ctx.platform || '')
-
-  if (!apiKey) throw new AppError('生图密钥不可用，请在设置中配置生图分组', 'IMAGE_NO_KEY')
+  const { apiKey, platform, model } = requireImageConfig(ctx)
   if (!platformSupportsImage(platform)) {
     throw new AppError(`平台「${platform}」不支持生图`, 'IMAGE_PLATFORM_UNSUPPORTED')
   }
@@ -95,9 +89,8 @@ export async function runImageGeneration(args, ctx = {}) {
   const started = Date.now()
 
   if (GEMINI_IMAGE_PLATFORMS.has(platform)) {
-    const model = String(args.model || cfg?.model || ctx.model || 'gemini-2.5-flash-image').replace(/^models\//, '')
     buildImageOptions(args, { model, platform })
-    const url = `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`
+    const url = `${base}/v1beta/models/${encodeURIComponent(model.replace(/^models\//, ''))}:generateContent`
     const resp = await fetch(url, {
       method: 'POST',
       signal,
@@ -131,7 +124,6 @@ export async function runImageGeneration(args, ctx = {}) {
   }
 
   // OpenAI / Grok
-  const model = String(args.model || cfg?.model || ctx.model || 'gpt-image-1')
   const options = buildImageOptions(args, { model, platform })
   const body = { model, prompt, n: Math.min(Math.max(Number(args.n) || 1, 1), 4), ...options }
   if (args.size) body.size = String(args.size)
@@ -193,14 +185,10 @@ const generateImageTool = {
   timeoutMs: 180000,
   description:
     '生成图片。根据文字描述（prompt）调用当前密钥所属平台的生图接口，返回图片（base64 data URL 或直链）。' +
-    '适合绘制插画、生成示意图、根据描述创作视觉内容。OpenAI gpt-image-2.6 支持 output_format=svg 矢量图和 gif 动图。注意：生成图片会产生费用。',
+    '适合绘制插画、生成示意图、根据描述创作视觉内容。注意：生成图片会产生费用。',
   parameters: jsonSchema(
     {
       prompt: t.string('图片描述，越具体越好（主体、风格、构图、光线等）'),
-      model: t.string('生图模型名；留空则使用当前选中的生图模型'),
-      n: t.number('生成数量，1-4，默认 1'),
-      size: t.string('尺寸，如 1024x1024（仅部分模型支持）'),
-      ...imageOptionProperties,
       timeout_secs: t.number(
         '本次调用允许的最长等待秒数，默认 180。'
         + '大尺寸、n>1 或高画质会更慢，可调大到 300。上限 600。'
@@ -211,10 +199,13 @@ const generateImageTool = {
   handler: async (args, ctx = {}) => runImageGeneration(args, ctx)
 }
 
-export function registerImageTool() {
-  if (!toolRegistry.has('generate_image')) {
-    toolRegistry.register(generateImageTool)
-  }
+export function registerImageTool(config) {
+  const capability = imageCapabilities(config)
+  toolRegistry.register({
+    ...generateImageTool,
+    description: generateImageTool.description + capability.description,
+    parameters: jsonSchema({ ...generateImageTool.parameters.properties, ...capability.properties }, ['prompt']),
+  })
   return toolRegistry
 }
 

@@ -243,23 +243,27 @@ window.__s2diag()   // 密钥列表、生图配置、工具名、当前状态
 
 ## GPT Image 2.6：SVG 与 GIF
 
-设置中选择 OpenAI 生图分组及接口返回的 `gpt-image-2.6-flare` 或
-`gpt-image-2.6-sunburst`，然后直接在对话里要求生成 SVG 矢量图或 GIF 动图。
+设置中选择 OpenAI 生图分组及接口返回的 `gpt-image-2.6` 系列模型，
+然后直接在对话里要求生成 SVG 矢量图或 GIF 动图。
 模型列表仍由服务端动态提供，不在前端添加不存在的模型。
 
-`generate_image` 和 `edit_image` 均支持：
+生成和编辑严格使用设置中的模型；工具不暴露任何模型选择参数，不允许覆盖、自动换名或回退到对话模型。
+工具描述会注明配置模型，并在每次注册时刷新参数：OpenAI 2.6 暴露下表参数；
+其他 GPT Image 仅提供常规格式，Grok 不提供这些输出格式控制，Gemini 仅提供文字描述及等待时间，不注册编辑工具。
+
+OpenAI 2.6 的 `generate_image` 和 `edit_image` 均支持：
 
 | 参数 | 用途 |
 |---|---|
 | `output_format` | `png` / `jpeg` / `webp` / `svg` / `gif` |
 | `frame_count` | GIF 帧数，正整数，需要 `output_format=gif` |
 | `frame_duration_ms` | GIF 每帧毫秒数，正整数，需要 `output_format=gif` |
-| `svg` | 可选 SVG 作者配置，如 `{"model":"gpt-6-astra","reasoning":{"effort":"high"}}` |
+| `svg` | 可选 SVG 作者配置，如 `{"reasoning":{"effort":"high"}}` |
 | `complexity` | 2.6 图像复杂度，与 SVG 作者的推理强度独立 |
 | `quality` | 模型支持的输出质量 |
 
 SVG/GIF 和 2.6 专用选项仅允许用于 OpenAI 的 `gpt-image-2.6` 系列。
-作者模型与可用参数取值仍由上游账号能力决定，接口报错会显示在工具结果中。
+SVG 作者模型由上游决定，工具不允许自行选择；可用参数取值仍由上游账号能力决定，接口报错会显示在工具结果中。
 
 示例：“生成一个 SVG 格式的应用图标”；“生成 GIF 动图，2 帧，每帧 100 毫秒”。
 工具图片卡片支持预览和“下载原图”；SVG 保留矢量源文件，GIF 保留动画帧，

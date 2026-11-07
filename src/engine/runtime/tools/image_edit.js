@@ -13,7 +13,7 @@ import { toolRegistry, jsonSchema, schemaTypes as t } from './registry.js'
 import { AppError } from '../../common/errors.js'
 import { getImage, cacheImage } from '../../repository/image_cache.js'
 import { imageExtension, resolveImageResults } from '../../common/image.js'
-import { buildImageOptions, imageOptionProperties } from './image_options.js'
+import { buildImageOptions, imageCapabilities, requireImageConfig } from './image_options.js'
 import {
   platformSupportsImage, GEMINI_IMAGE_PLATFORMS
 } from './image.js'
@@ -81,11 +81,7 @@ async function resolveSourceImage(ref) {
  * ctx.imageConfig 提供生图分组与密钥，与对话密钥解耦。
  */
 export async function runImageEdit(args, ctx = {}) {
-  const cfg = ctx.imageConfig && ctx.imageConfig.apiKey ? ctx.imageConfig : null
-  const apiKey = cfg ? cfg.apiKey : ctx.apiKey
-  const platform = cfg ? cfg.platform : (ctx.platform || '')
-
-  if (!apiKey) throw new AppError('生图密钥不可用，请在设置中配置生图分组', 'IMAGE_NO_KEY')
+  const { apiKey, platform, model } = requireImageConfig(ctx)
   if (!platformSupportsImage(platform)) {
     throw new AppError(`平台「${platform}」不支持图片编辑`, 'IMAGE_PLATFORM_UNSUPPORTED')
   }
@@ -102,7 +98,6 @@ export async function runImageEdit(args, ctx = {}) {
   }
 
   const base = String(ctx.baseUrl || '').replace(/\/+$/, '')
-  const model = String(args.model || cfg?.model || ctx.model || 'gpt-image-1')
   const options = buildImageOptions(args, { model, platform })
   const started = Date.now()
 
@@ -208,16 +203,12 @@ const editImageTool = {
     '在已有图片基础上做修改（图生图）。用 image 参数指定源图：可传之前 generate_image / edit_image ' +
     '返回的图片 ID（形如 img_xxx），也可传 data URL。prompt 描述要改成什么样——' +
     '建议明确指出不满意的部分与期望效果，例如「把背景换成海边，人物保持不变」。' +
-    '支持 mask 做局部重绘（PNG，透明区域为要重绘的部位）。OpenAI gpt-image-2.6 可输出 SVG / GIF。注意：会产生费用。',
+    '支持 mask 做局部重绘（PNG，透明区域为要重绘的部位）。注意：会产生费用。',
   parameters: jsonSchema(
     {
       image: t.string('源图：图片 ID（img_xxx）或 data URL'),
       prompt: t.string('编辑指令：说明要改什么、改成什么样'),
       mask: t.string('可选。局部重绘遮罩，PNG data URL，透明区域会被重绘'),
-      model: t.string('编辑模型名；留空用当前生图模型'),
-      n: t.number('生成数量，1-4'),
-      size: t.string('输出尺寸，如 1024x1024'),
-      ...imageOptionProperties
     },
     ['image', 'prompt']
   ),
@@ -240,8 +231,17 @@ const readImageTool = {
   handler: async (args, ctx = {}) => runImageRead(args, ctx)
 }
 
-export function registerImageEditTool() {
-  if (!toolRegistry.has('edit_image')) toolRegistry.register(editImageTool)
+export function registerImageEditTool(config) {
+  const capability = imageCapabilities(config)
+  if (!capability.supportsEdit) {
+    unregisterImageEditTool()
+    return toolRegistry
+  }
+  toolRegistry.register({
+    ...editImageTool,
+    description: editImageTool.description + capability.description,
+    parameters: jsonSchema({ ...editImageTool.parameters.properties, ...capability.properties }, ['image', 'prompt']),
+  })
   return toolRegistry
 }
 

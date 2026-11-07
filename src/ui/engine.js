@@ -159,10 +159,10 @@ export function resolveToolNames(channel, {
   const platformOk = configured && platformSupportsImage(imageConfig.platform)
   const supportsImage = configured && platformOk
 
-  // 能生图 → 同时提供生成与编辑（编辑依赖生图分组，能力天然成对）
+  // 每次按当前配置刷新工具描述和 schema，编辑工具按平台能力注册。
   if (supportsImage) {
-    registerImageTool()
-    registerImageEditTool()
+    registerImageTool(imageConfig)
+    registerImageEditTool(imageConfig)
   } else {
     unregisterImageTool()
     unregisterImageEditTool()
@@ -176,7 +176,10 @@ export function resolveToolNames(channel, {
   else unregisterImageReadTool()
 
   const candidates = [...BASE_TOOLS]
-  if (supportsImage) candidates.push('generate_image', 'edit_image')
+  if (supportsImage) {
+    candidates.push('generate_image')
+    if (toolRegistry.has('edit_image')) candidates.push('edit_image')
+  }
   if (supportsVision) candidates.push('read_image')
 
   return visibleToolNames({ candidateNames: candidates, includeAdmin })
