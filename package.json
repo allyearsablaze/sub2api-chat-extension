@@ -1,6 +1,6 @@
 {
   "name": "sub2api-chat-extension",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "description": "Sub2API 对话页：密钥选择 + 动态模型 + 推理/工具调用",
@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test:image": "node tests/image.mjs",
     "test:persistence": "npm run build && node tests/persistence.cjs"
   },
   "dependencies": {
