@@ -9,19 +9,44 @@ import { isImageModel, registerImageTool } from '../src/engine/runtime/tools/ima
 import { registerImageEditTool } from '../src/engine/runtime/tools/image_edit.js'
 import { toolRegistry } from '../src/engine/runtime/tools/registry.js'
 
-registerImageTool()
-registerImageEditTool()
-for (const name of ['generate_image', 'edit_image']) {
-  const properties = toolRegistry.tools.get(name).parameters.properties
-  assert.deepEqual(properties.output_format.enum, ['png', 'jpeg', 'webp', 'gif', 'svg'])
-  assert.equal(properties.svg.properties.reasoning.properties.effort.type, 'string')
-}
-
-const ctx = { platform: 'openai', model: 'gpt-image-2.6-flare' }
-for (const model of ['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst']) {
+const ctx = { platform: 'openai', model: 'gpt-image-2.6' }
+for (const model of ['gpt-image-2.6', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst']) {
+  const config = { ...ctx, model }
+  registerImageTool(config)
+  registerImageEditTool(config)
+  for (const name of ['generate_image', 'edit_image']) {
+    const tool = toolRegistry.get(name)
+    const properties = tool.parameters.properties
+    assert.equal(properties.model, undefined)
+    assert.equal(properties.svg.properties.model, undefined)
+    assert.deepEqual(properties.output_format.enum, ['png', 'jpeg', 'webp', 'gif', 'svg'])
+    assert.equal(properties.svg.properties.reasoning.properties.effort.type, 'string')
+    assert.ok(tool.description.includes(`「${model}」`))
+  }
   assert.equal(isImageModel(model, 'openai'), true)
-  assert.equal(buildImageOptions({ output_format: 'svg' }, { ...ctx, model }).output_format, 'svg')
+  assert.equal(buildImageOptions({ output_format: 'svg' }, config).output_format, 'svg')
 }
+for (const config of [
+  { platform: 'openai', model: 'gpt-image-1' },
+  { platform: 'grok', model: 'grok-imagine-image' },
+  { platform: 'gemini', model: 'gemini-2.5-flash-image' },
+]) {
+  registerImageTool(config)
+  registerImageEditTool(config)
+  const tool = toolRegistry.get('generate_image')
+  assert.ok(tool.description.includes(`「${config.model}」`))
+  assert.equal(tool.parameters.properties.frame_count, undefined)
+  assert.equal(tool.parameters.properties.svg, undefined)
+  assert.equal(tool.parameters.properties.model, undefined)
+  assert.equal(tool.description.includes('支持请求 SVG'), false)
+  if (config.platform === 'openai') assert.deepEqual(tool.parameters.properties.output_format.enum, ['png', 'jpeg', 'webp'])
+  else assert.equal(tool.parameters.properties.output_format, undefined)
+  assert.equal(toolRegistry.has('edit_image'), config.platform !== 'gemini')
+}
+registerImageTool(ctx)
+assert.ok(toolRegistry.get('generate_image').parameters.properties.frame_count)
+console.log('PASS dynamic schemas, configured-model descriptions and capability refresh')
+
 for (const args of [
   { output_format: 'bmp' },
   { output_format: 'png', frame_count: 2 },
@@ -31,6 +56,7 @@ for (const args of [
   { output_format: 'svg', svg: [] },
   { output_format: 'svg', svg: { reasoning: 'high' } },
   { output_format: 'svg', svg: { ignored: true } },
+  { output_format: 'svg', svg: { model: 'gpt-6-astra' } },
   { output_format: 'gif', svg: {} },
 ]) assert.throws(() => buildImageOptions(args, ctx), { code: 'IMAGE_INVALID_OPTIONS' })
 for (const unsupported of [
@@ -93,8 +119,31 @@ try {
   })
   await page.goto(origin)
   await page.evaluate(() => import('/image-fixture.js'))
+  const exposed = await page.evaluate(async () => {
+    const { resolveToolNames, toolRegistry } = await import('/src/ui/engine.js')
+    const config = { groupId: 1, apiKey: 'local-test', platform: 'openai', model: 'gpt-image-2.6' }
+    const results = []
+    for (const current of [config, { ...config, model: 'gpt-image-1' }, { ...config, platform: 'gemini', model: 'gemini-2.5-flash-image' }, config]) {
+      const names = resolveToolNames({}, { imageConfig: current })
+      const tools = toolRegistry.toModelTools(names)
+      const image = tools.find(tool => tool.name === 'generate_image')
+      results.push({ edit: names.includes('edit_image'), formats: image.parameters.properties.output_format?.enum || [],
+        model: image.parameters.properties.model, description: image.description })
+    }
+    const disabled = resolveToolNames({}, { imageConfig: null })
+    return { results, disabled: disabled.includes('generate_image') || disabled.includes('edit_image') }
+  })
+  assert.deepEqual(exposed.results.map(item => item.formats), [
+    ['png', 'jpeg', 'webp', 'gif', 'svg'], ['png', 'jpeg', 'webp'], [], ['png', 'jpeg', 'webp', 'gif', 'svg'],
+  ])
+  assert.deepEqual(exposed.results.map(item => item.edit), [true, true, false, true])
+  assert.ok(exposed.results.every(item => item.model === undefined))
+  assert.ok(exposed.results[0].description.includes('「gpt-image-2.6」'))
+  assert.ok(exposed.results[1].description.includes('「gpt-image-1」'))
+  assert.equal(exposed.disabled, false)
+  console.log('PASS UI registration refreshes the actual model tool schema on configuration changes')
   const run = (operation, args) => page.evaluate(async ({ operation, args }) => {
-    const context = { apiKey: 'local-test', platform: 'openai', imageConfig: { apiKey: 'local-test', platform: 'openai', model: 'gpt-image-2.6-flare' }, sessionId: 1, turnId: 'test' }
+    const context = { apiKey: 'local-test', platform: 'openai', imageConfig: { apiKey: 'local-test', platform: 'openai', model: 'gpt-image-2.6' }, sessionId: 1, turnId: 'test' }
     const result = operation === 'edit' ? await window.editTools.runImageEdit(args, context) : await window.imageTools.runImageGeneration(args, context)
     return { result, row: await window.imageCache.getImage(result.images[0].id) }
   }, { operation, args })
@@ -129,11 +178,11 @@ try {
   }
   for (const [format, bytes, mime] of [['svg', svg, 'image/svg+xml'], ['gif', gif, 'image/gif']]) {
     response = { output_format: format, data: [{ b64_json: bytes.toString('base64') }] }
-    const args = { prompt: `generate ${format}`, output_format: format, ...(format === 'gif' ? { frame_count: 2, frame_duration_ms: 100 } : { svg: { model: 'gpt-6-astra', reasoning: { effort: 'high' } } }) }
+    const args = { prompt: `generate ${format}`, output_format: format, ...(format === 'gif' ? { frame_count: 2, frame_duration_ms: 100 } : { svg: { reasoning: { effort: 'high' } } }) }
     const generated = await run('generate', args)
     const body = JSON.parse(requests.at(-1).body)
     assert.equal(body.output_format, format)
-    assert.equal(body.model, 'gpt-image-2.6-flare')
+    assert.equal(body.model, 'gpt-image-2.6')
     if (format === 'gif') assert.deepEqual([body.frame_count, body.frame_duration_ms], [2, 100])
     else assert.deepEqual(body.svg, args.svg)
     assert.equal(generated.row.mime, mime)
@@ -177,6 +226,39 @@ try {
     await page.evaluate(() => import('/image-fixture.js'))
     console.log(`PASS ${format}: generation, edit multipart, IndexedDB reload, preview and byte-exact download`)
   }
+  response = { data: [{ b64_json: pngBytes.toString('base64') }] }
+  for (const operation of ['generate', 'edit']) {
+    const locked = await run(operation, { prompt: 'keep configured model', image: png, model: 'gpt-image-2.6-sunburst' })
+    assert.equal(locked.result.model, 'gpt-image-2.6')
+    assert.equal(locked.row.model, 'gpt-image-2.6')
+    const request = requests.at(-1)
+    if (operation === 'generate') assert.equal(JSON.parse(request.body).model, 'gpt-image-2.6')
+    else {
+      const form = await new Request('http://local.test', { method: 'POST', headers: { 'Content-Type': request.type }, body: request.body }).formData()
+      assert.equal(form.get('model'), 'gpt-image-2.6')
+    }
+  }
+  const failures = await page.evaluate(async () => {
+    const context = { apiKey: 'chat-key', platform: 'openai', model: 'chat-model' }
+    const codes = []
+    for (const tool of [window.imageTools.runImageGeneration, window.editTools.runImageEdit]) {
+      for (const ctx of [context, { ...context, imageConfig: { apiKey: 'image-key', platform: 'openai' } }]) {
+        try { await tool({ prompt: 'draw', model: 'arbitrary' }, ctx) } catch (error) { codes.push(error.code) }
+      }
+    }
+    return codes
+  })
+  assert.deepEqual(failures, ['IMAGE_NO_KEY', 'IMAGE_NO_MODEL', 'IMAGE_NO_KEY', 'IMAGE_NO_MODEL'])
+  await page.route('**/v1beta/models/*', async route => {
+    requests.push({ url: route.request().url() })
+    await route.fulfill({ json: { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: pngBytes.toString('base64') } }] } }] } })
+  })
+  const geminiResult = await page.evaluate(() => window.imageTools.runImageGeneration({ prompt: 'draw', model: 'wrong-model' }, {
+    imageConfig: { apiKey: 'test', platform: 'gemini', model: 'gemini-2.5-flash-image' },
+  }))
+  assert.equal(geminiResult.model, 'gemini-2.5-flash-image')
+  assert.ok(requests.at(-1).url.endsWith('/v1beta/models/gemini-2.5-flash-image:generateContent'))
+  console.log('PASS generation/edit/Gemini cannot override configured model; missing configuration fails')
   const reproduction = process.env.IMAGE_REPRO_FILE ? await readFile(process.env.IMAGE_REPRO_FILE) : pngBytes
   for (const operation of ['generate', 'edit']) {
     response = { output_format: 'svg', data: [{ b64_json: reproduction.toString('base64') }] }
