@@ -10,6 +10,8 @@
 import { toolRegistry, jsonSchema, schemaTypes as t } from './registry.js'
 import { AppError } from '../../common/errors.js'
 import { cacheImage } from '../../repository/image_cache.js'
+import { parseImageResults } from '../../common/image.js'
+import { buildImageOptions, imageOptionProperties } from './image_options.js'
 
 export const IMAGE_PLATFORMS = new Set(['openai', 'grok'])
 export const GEMINI_IMAGE_PLATFORMS = new Set(['gemini', 'antigravity'])
@@ -94,6 +96,7 @@ export async function runImageGeneration(args, ctx = {}) {
 
   if (GEMINI_IMAGE_PLATFORMS.has(platform)) {
     const model = String(args.model || cfg?.model || ctx.model || 'gemini-2.5-flash-image').replace(/^models\//, '')
+    buildImageOptions(args, { model, platform })
     const url = `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`
     const resp = await fetch(url, {
       method: 'POST',
@@ -129,9 +132,9 @@ export async function runImageGeneration(args, ctx = {}) {
 
   // OpenAI / Grok
   const model = String(args.model || cfg?.model || ctx.model || 'gpt-image-1')
-  const body = { model, prompt, n: Math.min(Math.max(Number(args.n) || 1, 1), 4) }
+  const options = buildImageOptions(args, { model, platform })
+  const body = { model, prompt, n: Math.min(Math.max(Number(args.n) || 1, 1), 4), ...options }
   if (args.size) body.size = String(args.size)
-  if (args.quality) body.quality = String(args.quality)
 
   const resp = await fetch(`${base}/v1/images/generations`, {
     method: 'POST',
@@ -143,11 +146,7 @@ export async function runImageGeneration(args, ctx = {}) {
   const json = await resp.json()
   if (json.error) throw new AppError(json.error.message || '生图失败', 'IMAGE_UPSTREAM_ERROR')
 
-  const images = []
-  for (const d of json.data || []) {
-    if (d.b64_json) images.push({ data_url: `data:image/png;base64,${d.b64_json}`, mime: 'image/png' })
-    else if (d.url) images.push({ url: d.url, mime: 'image/png' })
-  }
+  const images = parseImageResults(json, options.output_format)
   if (!images.length) throw new AppError('上游未返回图片数据', 'IMAGE_EMPTY_RESULT')
   const cached2 = await persistImages(images, { prompt, model, platform, sessionId: ctx.sessionId, turnId: ctx.turnId })
   return { ok: true, model, platform, images: cached2, elapsed_ms: Date.now() - started }
@@ -194,14 +193,14 @@ const generateImageTool = {
   timeoutMs: 180000,
   description:
     '生成图片。根据文字描述（prompt）调用当前密钥所属平台的生图接口，返回图片（base64 data URL 或直链）。' +
-    '适合绘制插画、生成示意图、根据描述创作视觉内容。注意：生成图片会产生费用。',
+    '适合绘制插画、生成示意图、根据描述创作视觉内容。OpenAI gpt-image-2.6 支持 output_format=svg 矢量图和 gif 动图。注意：生成图片会产生费用。',
   parameters: jsonSchema(
     {
       prompt: t.string('图片描述，越具体越好（主体、风格、构图、光线等）'),
       model: t.string('生图模型名；留空则使用当前选中的生图模型'),
       n: t.number('生成数量，1-4，默认 1'),
       size: t.string('尺寸，如 1024x1024（仅部分模型支持）'),
-      quality: t.string('质量，如 standard / high（仅部分模型支持）'),
+      ...imageOptionProperties,
       timeout_secs: t.number(
         '本次调用允许的最长等待秒数，默认 180。'
         + '大尺寸、n>1 或高画质会更慢，可调大到 300。上限 600。'

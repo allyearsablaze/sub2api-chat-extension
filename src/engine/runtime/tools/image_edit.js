@@ -12,6 +12,8 @@
 import { toolRegistry, jsonSchema, schemaTypes as t } from './registry.js'
 import { AppError } from '../../common/errors.js'
 import { getImage, cacheImage } from '../../repository/image_cache.js'
+import { imageExtension, parseImageResults } from '../../common/image.js'
+import { buildImageOptions, imageOptionProperties } from './image_options.js'
 import {
   platformSupportsImage, GEMINI_IMAGE_PLATFORMS
 } from './image.js'
@@ -26,12 +28,6 @@ function parseDataUrl(dataUrl) {
   return { mime: m[1], bytes }
 }
 
-function extOf(mime) {
-  const m = String(mime || 'image/png').toLowerCase()
-  if (m.includes('jpeg') || m.includes('jpg')) return 'jpg'
-  if (m.includes('webp')) return 'webp'
-  return 'png'
-}
 
 async function readError(resp) {
   try {
@@ -107,24 +103,28 @@ export async function runImageEdit(args, ctx = {}) {
 
   const base = String(ctx.baseUrl || '').replace(/\/+$/, '')
   const model = String(args.model || cfg?.model || ctx.model || 'gpt-image-1')
+  const options = buildImageOptions(args, { model, platform })
   const started = Date.now()
 
   const form = new FormData()
   form.append('model', model)
   form.append('prompt', prompt)
+  for (const [key, value] of Object.entries(options)) {
+    form.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value))
+  }
   if (args.n) form.append('n', String(Math.min(Math.max(Number(args.n) || 1, 1), 4)))
   if (args.size) form.append('size', String(args.size))
 
   const parsed = parseDataUrl(source.dataUrl)
   if (!parsed) throw new AppError('源图不是有效的 data URL', 'IMAGE_BAD_SOURCE')
   const blob = new Blob([parsed.bytes], { type: parsed.mime })
-  form.append('image', blob, `source.${extOf(parsed.mime)}`)
+  form.append('image', blob, `source.${imageExtension(parsed.mime)}`)
 
   // 局部重绘：mask 必须是带透明通道的 PNG，尺寸与源图一致
   if (args.mask) {
     const maskParsed = parseDataUrl(String(args.mask))
     if (maskParsed) {
-      form.append('mask', new Blob([maskParsed.bytes], { type: maskParsed.mime }), `mask.${extOf(maskParsed.mime)}`)
+      form.append('mask', new Blob([maskParsed.bytes], { type: maskParsed.mime }), `mask.${imageExtension(maskParsed.mime)}`)
     }
   }
 
@@ -139,11 +139,7 @@ export async function runImageEdit(args, ctx = {}) {
   const json = await resp.json()
   if (json.error) throw new AppError(json.error.message || '图片编辑失败', 'IMAGE_UPSTREAM_ERROR')
 
-  const images = []
-  for (const d of json.data || []) {
-    if (d.b64_json) images.push({ data_url: `data:image/png;base64,${d.b64_json}`, mime: 'image/png' })
-    else if (d.url) images.push({ url: d.url, mime: 'image/png' })
-  }
+  const images = parseImageResults(json, options.output_format)
   if (!images.length) throw new AppError('上游未返回编辑结果', 'IMAGE_EMPTY_RESULT')
 
   /* 与 generate_image 一致：写缓存并只返回短 ID。
@@ -211,7 +207,7 @@ const editImageTool = {
     '在已有图片基础上做修改（图生图）。用 image 参数指定源图：可传之前 generate_image / edit_image ' +
     '返回的图片 ID（形如 img_xxx），也可传 data URL。prompt 描述要改成什么样——' +
     '建议明确指出不满意的部分与期望效果，例如「把背景换成海边，人物保持不变」。' +
-    '支持 mask 做局部重绘（PNG，透明区域为要重绘的部位）。注意：会产生费用。',
+    '支持 mask 做局部重绘（PNG，透明区域为要重绘的部位）。OpenAI gpt-image-2.6 可输出 SVG / GIF。注意：会产生费用。',
   parameters: jsonSchema(
     {
       image: t.string('源图：图片 ID（img_xxx）或 data URL'),
@@ -219,7 +215,8 @@ const editImageTool = {
       mask: t.string('可选。局部重绘遮罩，PNG data URL，透明区域会被重绘'),
       model: t.string('编辑模型名；留空用当前生图模型'),
       n: t.number('生成数量，1-4'),
-      size: t.string('输出尺寸，如 1024x1024')
+      size: t.string('输出尺寸，如 1024x1024'),
+      ...imageOptionProperties
     },
     ['image', 'prompt']
   ),

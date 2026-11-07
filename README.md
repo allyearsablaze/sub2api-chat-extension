@@ -241,6 +241,40 @@ src/
 window.__s2diag()   // 密钥列表、生图配置、工具名、当前状态
 ```
 
+## GPT Image 2.6：SVG 与 GIF
+
+设置中选择 OpenAI 生图分组及接口返回的 `gpt-image-2.6-flare` 或
+`gpt-image-2.6-sunburst`，然后直接在对话里要求生成 SVG 矢量图或 GIF 动图。
+模型列表仍由服务端动态提供，不在前端添加不存在的模型。
+
+`generate_image` 和 `edit_image` 均支持：
+
+| 参数 | 用途 |
+|---|---|
+| `output_format` | `png` / `jpeg` / `webp` / `svg` / `gif` |
+| `frame_count` | GIF 帧数，正整数，需要 `output_format=gif` |
+| `frame_duration_ms` | GIF 每帧毫秒数，正整数，需要 `output_format=gif` |
+| `svg` | 可选 SVG 作者配置，如 `{"model":"gpt-6-astra","reasoning":{"effort":"high"}}` |
+| `complexity` | 2.6 图像复杂度，与 SVG 作者的推理强度独立 |
+| `quality` | 模型支持的输出质量 |
+
+SVG/GIF 和 2.6 专用选项仅允许用于 OpenAI 的 `gpt-image-2.6` 系列。
+作者模型与可用参数取值仍由上游账号能力决定，接口报错会显示在工具结果中。
+
+示例：“生成一个 SVG 格式的应用图标”；“生成 GIF 动图，2 帧，每帧 100 毫秒”。
+工具图片卡片支持预览和“下载原图”；SVG 保留矢量源文件，GIF 保留动画帧，
+两者均按真实 MIME 缓存、刷新恢复和下载，不转码为 PNG。SVG 以图片元素加载。
+未指定输出格式时沿用接口默认值。
+
+图片专项回归（需要已安装依赖与 Playwright Chromium）：
+
+```bash
+npm run test:image
+```
+
+测试使用本地协议样本，检查生成/编辑请求、格式解析、缓存刷新、浏览器预览和下载原始字节，
+不使用真实 API Key。真实上游模型生成效果需使用已开通能力的账号另外验收。
+
 ## 已知限制
 
 - **Gemini 通道不支持图生图**：后端 `/v1/images/edits` 只对 OpenAI / Grok 系开放
