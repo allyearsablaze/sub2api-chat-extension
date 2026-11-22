@@ -14,7 +14,7 @@ import {
   modelParamsWithDefaults,
   sanitizeExecutionParams
 } from '../model/model_params.js'
-import { buildUserContent } from '../model/message_content.js'
+import { buildUserContent, withImageEditHandles } from '../model/message_content.js'
 import { serializeToolResultForContext } from '../model/tool_result_summary.js'
 import { deleteImagesBySession, deleteImagesByTurn } from './image_cache.js'
 
@@ -357,13 +357,7 @@ export async function buildHistoryMessages(sessionId, options = {}) {
         const payload = parts.length ? (parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts) : ''
         if (payload) messages.push({ role: 'user', content: payload })
       } else {
-        let text = textContent
-        // 恢复图片句柄提示：模型需要 ID 才能对这张图执行 edit_image
-        const handles = metas.filter((m) => m.image_id && m.is_image)
-        if (handles.length) {
-          const lines = handles.map((h) => `- ${h.file_name || '上传的图片'}：${h.image_id}`)
-          text = `${text}\n\n[用户上传的图片句柄，可直接用于 edit_image 的 image 参数]\n${lines.join('\n')}`.trim()
-        }
+        const text = withImageEditHandles(textContent, metas)
         const payload = metas.length
           ? buildUserContent(text, await hydrateEventAttachments(metas))
           : text

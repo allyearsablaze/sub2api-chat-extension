@@ -18,7 +18,7 @@ import {
 import { toEventVo } from '../repository/event_vo.js'
 import { getConfigEntries } from '../repository/config.js'
 import { runToolLoop } from './tool_loop.js'
-import { buildUserContent } from '../model/message_content.js'
+import { buildUserContent, withImageEditHandles } from '../model/message_content.js'
 import { cacheImage } from '../repository/image_cache.js'
 import {
   enqueueTask, listSessionTasks, claimNextTask, finishTask, updateTask, cancelTask
@@ -107,8 +107,8 @@ export async function runSessionTurn({
    * 实测模型会回答「我需要一个图片句柄，要么 img_xxx 要么 data URL」。
    * 这里把上传图一并写入 image_cache，并把 ID 拼进文本告知模型。 */
   const rawAttachments = Array.isArray(input?.attachments) ? input.attachments : []
-  const uploadedHandles = []
-  for (const a of rawAttachments) {
+  const uploadedHandles = new Map()
+  for (const [index, a] of rawAttachments.entries()) {
     const isImage = String(a.content_type || '').toLowerCase().startsWith('image/')
     if (!isImage || !a.data_url) continue
     try {
@@ -120,7 +120,7 @@ export async function runSessionTurn({
         session_id: sessionId,
         turn_id: turnId,
       })
-      uploadedHandles.push({ id: row.id, name: a.file_name || '' })
+      uploadedHandles.set(index, row.id)
     } catch (_) {
       // 缓存失败不影响对话：图仍然会作为 parts 发给模型
     }
@@ -133,21 +133,10 @@ export async function runSessionTurn({
       : null,
   }))
 
-  /* 在文本末尾附上句柄说明，模型才知道可以对哪张图做 edit_image */
-  let userText = String(input?.text || '')
-  if (uploadedHandles.length) {
-    const lines = uploadedHandles.map(
-      (h) => `- ${h.name || '上传的图片'}：${h.id}`
-    )
-    userText = `${userText}\n\n[用户上传的图片句柄，可直接用于 edit_image 的 image 参数]\n${lines.join('\n')}`.trim()
-  }
-  const userContent = buildUserContent(userText, builtAttachments)
-
   /* 事件里保存「可直接渲染的附件元信息 + 图片地址」，
    * 时间线据此在用户气泡下方显示图片；content 本身可能是 parts 数组（给模型用） */
   const eventAttachments = rawAttachments.map((a, i) => {
     const isImage = String(a.content_type || '').toLowerCase().startsWith('image/')
-    const handle = isImage ? uploadedHandles[i] || uploadedHandles.find((h) => h.name === a.file_name) : null
     return {
       file_name: a.file_name || '',
       content_type: a.content_type || '',
@@ -155,9 +144,11 @@ export async function runSessionTurn({
       data_url: a.data_url || '',
       is_image: isImage,
       // 图片句柄：历史重新组装时据此恢复「可编辑」提示
-      image_id: handle?.id || '',
+      image_id: uploadedHandles.get(i) || '',
     }
   })
+  const userText = withImageEditHandles(String(input?.text || ''), eventAttachments)
+  const userContent = buildUserContent(userText, builtAttachments)
   const userEvent = await appendEvent(sessionId, {
     turn_id: turnId,
     event_type: 'user_message',

@@ -141,13 +141,13 @@ npm run build    # 产出 dist/
 ```
 生成/编辑 → 写入 image_cache → 只把短 ID（img_xxx）交给模型
                                     ↓
-                    模型要继续改 → edit_image({ image: 'img_xxx' })
+                    模型要继续改 → edit_image({ images: ['img_xxx'], prompt: '...' })
                     模型要看图   → read_image({ image: 'img_xxx' })
 ```
 
 实测：工具结果从 1,211,810 字符压到 **145 字符**，界面照常显示完整图片。
 
-编辑结果记录 `parent_id` 指向源图，形成链路：
+编辑结果记录 `parent_id` 指向第一张源图，形成主图编辑链路：
 
 ```
 img_abc (generate)
@@ -155,7 +155,10 @@ img_abc (generate)
         └─ img_ghi (edit, parent=img_def)
 ```
 
-用户手动上传的图片同样分配句柄，可以直接 `edit_image`，不需要用户再提供链接。
+用户手动上传的图片同样分配句柄，不需要再提供链接。可以上传多张图后说：“以第一张为背景，把第二张的商品放在桌面上。”
+`edit_image` 的 `images` 必须是有序的图片 ID 数组，单图也传长度为 1 的数组。GPT Image 最多传 16 张，
+Grok 在 sub2api v0.2.20 中最多传 3 张，其他 OpenAI 编辑模型在本工具中限 1 张。第一张是主图；如传 `mask`，仅作用于第一张。
+`n` 仍是输出张数。模型仍取设置，不会因为多图合成而换模型。
 
 ### 图片何时降级
 
