@@ -36,6 +36,7 @@ export function imageCapabilities({ model, platform }) {
   return {
     properties,
     supportsEdit: !gemini,
+    maxEditImages: gemini ? 0 : gptImage ? 16 : platform === 'grok' ? 3 : 1,
     description: `当前固定使用用户配置的模型「${model}」（平台 ${platform}），不可自行选择或更换模型。`
       + (formats ? `可请求的输出格式：${formats.join(' / ')}。` : '输出格式由当前模型接口决定。')
       + (image26 ? '支持请求 SVG 矢量图、GIF 动图及帧数/帧时长控制；实际能力以上游响应为准。' : ''),

@@ -16,6 +16,15 @@ export function describeAttachment(meta = {}) {
   return `[附件] ${name}（${type}，${sizeText}）`
 }
 
+/** 告知模型可编辑的图片 ID，编号与消息中的图片顺序一致。 */
+export function withImageEditHandles(text, attachments) {
+  const lines = attachments.filter((item) => item.is_image).flatMap((item, index) => (
+    item.image_id ? [`- 第 ${index + 1} 张（${item.file_name || '上传的图片'}）：${item.image_id}`] : []
+  ))
+  if (!lines.length) return text
+  return `${text}\n\n[用户上传的图片句柄：按需要的顺序传入 edit_image 的 images 数组，第一张是主图]\n${lines.join('\n')}`.trim()
+}
+
 export function buildUserContent(text, attachments = []) {
   const value = String(text || '')
   const items = Array.isArray(attachments) ? attachments : []

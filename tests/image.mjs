@@ -3,11 +3,23 @@ import { readFile } from 'node:fs/promises'
 import { createServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { chromium } from 'playwright'
+import { withImageEditHandles } from '../src/engine/model/message_content.js'
 import { buildImageOptions } from '../src/engine/runtime/tools/image_options.js'
 import { parseImageResults, imageExtension } from '../src/engine/common/image.js'
 import { isImageModel, registerImageTool } from '../src/engine/runtime/tools/image.js'
 import { registerImageEditTool } from '../src/engine/runtime/tools/image_edit.js'
 import { toolRegistry } from '../src/engine/runtime/tools/registry.js'
+
+const hint = withImageEditHandles('combine', [
+  { is_image: false, file_name: 'notes.txt' },
+  { is_image: true, file_name: 'photo.png', image_id: 'img_first' },
+  { is_image: true, file_name: 'photo.png' },
+  { is_image: true, file_name: 'photo.png', image_id: 'img_third' },
+])
+assert.match(hint, /edit_image 的 images 数组/)
+assert.match(hint, /第 1 张（photo.png）：img_first/)
+assert.match(hint, /第 3 张（photo.png）：img_third/)
+assert.doesNotMatch(hint, /notes.txt/)
 
 const ctx = { platform: 'openai', model: 'gpt-image-2.6' }
 for (const model of ['gpt-image-2.6', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst']) {
@@ -23,6 +35,12 @@ for (const model of ['gpt-image-2.6', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunb
     assert.equal(properties.svg.properties.reasoning.properties.effort.type, 'string')
     assert.ok(tool.description.includes(`「${model}」`))
   }
+  const edit = toolRegistry.get('edit_image').parameters
+  assert.deepEqual(edit.required, ['images', 'prompt'])
+  assert.equal(edit.properties.image, undefined)
+  assert.equal(edit.properties.images.type, 'array')
+  assert.equal(edit.properties.images.minItems, 1)
+  assert.equal(edit.properties.images.maxItems, 16)
   assert.equal(isImageModel(model, 'openai'), true)
   assert.equal(buildImageOptions({ output_format: 'svg' }, config).output_format, 'svg')
 }
@@ -42,6 +60,9 @@ for (const config of [
   if (config.platform === 'openai') assert.deepEqual(tool.parameters.properties.output_format.enum, ['png', 'jpeg', 'webp'])
   else assert.equal(tool.parameters.properties.output_format, undefined)
   assert.equal(toolRegistry.has('edit_image'), config.platform !== 'gemini')
+  if (config.platform !== 'gemini') {
+    assert.equal(toolRegistry.get('edit_image').parameters.properties.images.maxItems, config.platform === 'grok' ? 3 : 16)
+  }
 }
 registerImageTool(ctx)
 assert.ok(toolRegistry.get('generate_image').parameters.properties.frame_count)
@@ -114,7 +135,7 @@ try {
   let response = {}
   const requests = []
   await page.route('**/v1/images/*', async route => {
-    requests.push({ url: route.request().url(), type: route.request().headers()['content-type'], body: route.request().postData() })
+    requests.push({ url: route.request().url(), type: route.request().headers()['content-type'], body: route.request().postDataBuffer() })
     await route.fulfill({ json: response })
   })
   await page.goto(origin)
@@ -142,6 +163,7 @@ try {
   assert.ok(exposed.results[1].description.includes('「gpt-image-1」'))
   assert.equal(exposed.disabled, false)
   console.log('PASS UI registration refreshes the actual model tool schema on configuration changes')
+  const pngId = await page.evaluate(async dataUrl => (await window.imageCache.cacheImage({ data_url: dataUrl, mime: 'image/png', action: 'upload' })).id, png)
   const run = (operation, args) => page.evaluate(async ({ operation, args }) => {
     const context = { apiKey: 'local-test', platform: 'openai', imageConfig: { apiKey: 'local-test', platform: 'openai', model: 'gpt-image-2.6' }, sessionId: 1, turnId: 'test' }
     const result = operation === 'edit' ? await window.editTools.runImageEdit(args, context) : await window.imageTools.runImageGeneration(args, context)
@@ -201,7 +223,7 @@ try {
       }, generated.row.data_url)
       assert.equal(frameCount, 2)
     }
-    const edited = await run('edit', { ...args, image: png, quality: 'high', complexity: 'low' })
+    const edited = await run('edit', { ...args, images: [pngId], quality: 'high', complexity: 'low' })
     const request = requests.at(-1)
     const form = await new Request('http://local.test', { method: 'POST', headers: { 'Content-Type': request.type }, body: request.body }).formData()
     assert.equal(form.get('output_format'), format)
@@ -214,7 +236,7 @@ try {
     const read = await page.evaluate(id => window.editTools.runImageRead({ image: id }), edited.row.id)
     assert.equal(read.data_url, edited.row.data_url)
     assert.equal(read.mime, mime)
-    const repeated = await run('edit', { ...args, image: generated.row.id })
+    const repeated = await run('edit', { ...args, images: [generated.row.id] })
     const repeatRequest = requests.at(-1)
     const repeatForm = await new Request('http://local.test', { method: 'POST', headers: { 'Content-Type': repeatRequest.type }, body: repeatRequest.body }).formData()
     assert.equal(repeatForm.get('image').name, `source.${format}`)
@@ -227,8 +249,64 @@ try {
     console.log(`PASS ${format}: generation, edit multipart, IndexedDB reload, preview and byte-exact download`)
   }
   response = { data: [{ b64_json: pngBytes.toString('base64') }] }
+  const { second, mask } = await page.evaluate(async () => {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 1
+    const mask = canvas.toDataURL()
+    const context = canvas.getContext('2d')
+    context.fillStyle = 'red'
+    context.fillRect(0, 0, 1, 1)
+    const second = await window.imageCache.cacheImage({ data_url: canvas.toDataURL(), mime: 'image/png', action: 'upload' })
+    return { second, mask }
+  })
+  const sourceIds = [second.id, pngId]
+  const composite = await run('edit', { images: sourceIds, prompt: 'Use the first image as background and the second as reference', n: 1, mask })
+  const multiRequest = requests.at(-1)
+  assert.equal(new URL(multiRequest.url).pathname, '/v1/images/edits')
+  const multiForm = await new Request('http://local.test', { method: 'POST', headers: { 'Content-Type': multiRequest.type }, body: multiRequest.body }).formData()
+  const sourceFiles = multiForm.getAll('image[]')
+  assert.deepEqual(sourceFiles.map(file => [file.name, file.type]), [['source-1.png', 'image/png'], ['source-2.png', 'image/png']])
+  assert.deepEqual(Buffer.from(await sourceFiles[0].arrayBuffer()), Buffer.from(second.data_url.split(',')[1], 'base64'))
+  assert.deepEqual(Buffer.from(await sourceFiles[1].arrayBuffer()), pngBytes)
+  assert.equal(multiForm.has('image'), false)
+  assert.equal(multiForm.get('n'), '1')
+  assert.deepEqual(multiForm.getAll('mask').map(file => file.name), ['mask.png'])
+  assert.deepEqual(Buffer.from(await multiForm.get('mask').arrayBuffer()), Buffer.from(mask.split(',')[1], 'base64'))
+  assert.deepEqual(composite.result.source_ids, sourceIds)
+  assert.equal(composite.result.source_id, sourceIds[0])
+  assert.equal(composite.row.parent_id, sourceIds[0])
+  const requestCount = requests.length
+  const validationCodes = await page.evaluate(async ({ pngId, png, sourceIds }) => {
+    const codes = []
+    for (const [args, platform, model] of [
+      [{ images: [] }],
+      [{ image: pngId }],
+      [{ images: Array(17).fill(pngId) }],
+      [{ images: [pngId, png] }],
+      [{ images: [pngId, 'img_missingreference'] }],
+      [{ images: sourceIds, mask: 'invalid' }],
+      [{ images: Array(4).fill(pngId) }, 'grok', 'grok-imagine-image'],
+      [{ images: sourceIds }, 'openai', 'dall-e-2'],
+    ]) {
+      try {
+        await window.editTools.runImageEdit({ prompt: 'edit', ...args }, {
+          imageConfig: { apiKey: 'local-test', platform: platform || 'openai', model: model || 'gpt-image-2.6' },
+        })
+        codes.push('unexpected success')
+      } catch (error) {
+        codes.push(error.code)
+      }
+    }
+    return codes
+  }, { pngId, png, sourceIds })
+  assert.deepEqual(validationCodes, [
+    'IMAGE_BAD_SOURCES', 'IMAGE_BAD_SOURCES', 'IMAGE_BAD_SOURCES', 'IMAGE_BAD_SOURCE',
+    'IMAGE_NOT_FOUND', 'IMAGE_BAD_MASK', 'IMAGE_BAD_SOURCES', 'IMAGE_BAD_SOURCES',
+  ])
+  assert.equal(requests.length, requestCount)
+  console.log('PASS multi-image edits: ordered multipart bytes, mask, primary source and invalid input checks')
   for (const operation of ['generate', 'edit']) {
-    const locked = await run(operation, { prompt: 'keep configured model', image: png, model: 'gpt-image-2.6-sunburst' })
+    const locked = await run(operation, { prompt: 'keep configured model', images: [pngId], model: 'gpt-image-2.6-sunburst' })
     assert.equal(locked.result.model, 'gpt-image-2.6')
     assert.equal(locked.row.model, 'gpt-image-2.6')
     const request = requests.at(-1)
@@ -262,7 +340,7 @@ try {
   const reproduction = process.env.IMAGE_REPRO_FILE ? await readFile(process.env.IMAGE_REPRO_FILE) : pngBytes
   for (const operation of ['generate', 'edit']) {
     response = { output_format: 'svg', data: [{ b64_json: reproduction.toString('base64') }] }
-    const generated = await run(operation, { prompt: 'SVG', output_format: 'svg', image: png })
+    const generated = await run(operation, { prompt: 'SVG', output_format: 'svg', images: [pngId] })
     assert.equal(generated.row.mime, 'image/png')
     assert.match(generated.result.warnings[0], /实际返回 PNG/)
     await verifyCard(generated.row, reproduction, 'png')
